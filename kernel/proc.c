@@ -701,3 +701,9 @@ procdump(void)
     printk("\n");
   }
 }
+
+int
+getpinfo(struct pinfo *buf, int max)
+{
+
+}
