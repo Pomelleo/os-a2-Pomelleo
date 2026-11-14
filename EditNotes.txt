@@ -1,0 +1,38 @@
+Part 1: syscall getpinfo
+
+11/11/2026 3:00PM
+
+	- addded syscall to kernel/syscall.h
+	- added prototype to kernel/defs.h under //proc.c
+	- added prototype to user/user.h under //syscalls
+	!- added to kernel/syscproc.c
+		!need to add function body
+	!- added to user/usys.pl 
+		?do I need to find a different file ex usys.S
+	- added function to kernel/syscall.c under //extern and //syscalls[]
+	!- add code to kernel/proc.c
+		!need to write code
+	!- add file to call getpinfo
+	!- add getpinfo file to Makefile 
+	!- run test
+  
+Edits to Commit: kernel/ syscall.h, defs.h, sysproc.c, syscall.c, proc.c
+		 user/ user.h, usys.pl
+  
+comitted 4:40PM
+
+11/11/2026 6:00 PM
+
+	- added runticks, nsched, ctime proc.h 
+	- added runticks =+ 1 to usertrap()
+
+11/11/2026 7:00 PM
+11/13/2026 3:50 PM
+	
+	- added struct pinfo to kernel/defs.h
+	-x created kernel/pinfo.h
+		-x need to remove pinfo if not in use
+	- added code to getpinfo in kernel/proc.c 	
+	- added pinfo definition to kernel/proc.h
+11/13/2026 6:20 PM
+		

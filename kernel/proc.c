@@ -705,5 +705,17 @@ procdump(void)
 int
 getpinfo(struct pinfo *buf, int max)
 {
-
+  struct proc *p = myproc(); 
+  acquire(&p->lock);			//must hold and release lock
+  if (p->state == UNUSED){
+	  //copy statud of p to buf 
+	  buf->pid = p->pid;
+  	  buf->state = p->state;
+	  buf->runticks = p->runticks;
+	  buf->nsched = p->runticks;
+	  buf->ctime = p->ctime;
+	  buf->name = p->name; 
+  }
+  release(&p->lock);
+  copyout(23, );
 }
