@@ -81,9 +81,10 @@ usertrap(void)
   if (killed(p))
     kexit(-1);
 
-  // give up the CPU if this is a timer interrupt.
-  if (which_dev == 2)
-    p->runticks += 1; 
+  // on a timer interrupt, charge this process one tick and let the
+  // MLFQ rules decide if it has to give up the CPU.
+  // (stock xv6 yielded on every single tick)
+  if (which_dev == 2 && mlfq_tick(p))
     yield();
 
   prepare_return();
@@ -154,8 +155,9 @@ kerneltrap()
     panic("kerneltrap");
   }
 
-  // give up the CPU if this is a timer interrupt.
-  if (which_dev == 2 && myproc() != 0)
+  // same as in usertrap: charge the tick to whatever process this CPU
+  // was running (if any) and only yield if the MLFQ rules say so
+  if (which_dev == 2 && myproc() != 0 && mlfq_tick(myproc()))
     yield();
 
   // the yield() may have caused some traps to occur,
@@ -170,6 +172,11 @@ clockintr()
   if (cpuid() == 0) {
     acquire(&tickslock);
     ticks++;
+    // rule 8: every 64 ticks send every process back to level 0.
+    // we hold tickslock here and mlfq_boost takes each p->lock,
+    // which matches the kernel's lock order (tickslock, then p->lock)
+    if (ticks % 64 == 0)
+      mlfq_boost();
     wakeup(&ticks);
     release(&tickslock);
   }

@@ -5,10 +5,20 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "pinfo.h"
 
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
+
+// ---- MLFQ settings ----
+// time slice in ticks for each level. level 0 is the highest priority
+int mlfq_slice[NLEVEL] = { 1, 2, 4, 8 };
+
+// one round-robin cursor per level: the proc[] slot that was most recently
+// picked from that level. they start at the last slot so the very first
+// scan of each level begins at slot 0
+static int mlfq_cursor[NLEVEL] = { NPROC - 1, NPROC - 1, NPROC - 1, NPROC - 1 };
 
 struct proc *initproc;
 
@@ -124,6 +134,16 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+
+  // every new process starts with fresh stats at level 0 (rule 3).
+  // nothing here is copied from the parent.
+  // ticks is read without tickslock on purpose: we're holding p->lock,
+  // and the kernel's lock order is tickslock first, then p->lock
+  p->runticks = 0;
+  p->nsched = 0;
+  p->ctime = ticks;
+  p->level = 0;
+  p->used = 0;
 
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
@@ -425,6 +445,9 @@ kwait(uint64 addr)
 //  - swtch to start running that process.
 //  - eventually that process transfers control
 //    via swtch back to the scheduler.
+//
+// MLFQ version: always run a RUNNABLE process from the highest-priority
+// (lowest-numbered) level that has one, round-robin within that level
 void
 scheduler(void)
 {
@@ -442,26 +465,45 @@ scheduler(void)
     intr_off();
 
     int found = 0;
-    for (p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if (p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
 
-        // Don't re-enable interrupts on release.
-        mycpu()->intena = 0;
+    // rule 1: go through the levels from highest priority (0) to lowest (3)
+    // and stop at the first level that has something to run
+    for (int level = 0; level < NLEVEL && !found; level++) {
 
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+      // rule 2: round-robin inside the level. walk the whole table once,
+      // starting at the slot right after the one we picked last time
+      int start = mlfq_cursor[level];
+      for (int i = 1; i <= NPROC; i++) {
+        p = &proc[(start + i) % NPROC];
+
+        // only ever hold one p->lock at a time, and check the state
+        // while holding it so it can't change under us
+        acquire(&p->lock);
+        if (p->state == RUNNABLE && p->level == level) {
+          mlfq_cursor[level] = p - proc;   // remember this slot for next time
+          p->nsched++;                // stats: one more switch to this process
+
+          // Switch to chosen process.  It is the process's job
+          // to release its lock and then reacquire it
+          // before jumping back to us.
+          p->state = RUNNING;
+          c->proc = p;
+          swtch(&c->context, &p->context);
+
+          // Don't re-enable interrupts on release.
+          mycpu()->intena = 0;
+
+          // Process is done running for now.
+          // It should have changed its p->state before coming back.
+          c->proc = 0;
+          found = 1;
+          release(&p->lock);
+          break;   // start over from level 0, something better may be ready
+        }
+        release(&p->lock);
       }
-      release(&p->lock);
     }
+
     if (found == 0) {
       // nothing to run; stop running on this core until an interrupt.
       asm volatile("wfi");
@@ -702,20 +744,115 @@ procdump(void)
   }
 }
 
+// is there a RUNNABLE process at a higher-priority level than `level`?
+// (not counting `me`). takes each p->lock one at a time, so the caller
+// must NOT be holding any p->lock
 int
-getpinfo(struct pinfo *buf, int max)
+higher_runnable(struct proc *me, int level)
 {
-  struct proc *p = myproc(); 
-  acquire(&p->lock);			//must hold and release lock
-  if (p->state == UNUSED){
-	  //copy statud of p to buf 
-	  buf->pid = p->pid;
-  	  buf->state = p->state;
-	  buf->runticks = p->runticks;
-	  buf->nsched = p->runticks;
-	  buf->ctime = p->ctime;
-	  buf->name = p->name; 
+  struct proc *q;
+
+  for (q = proc; q < &proc[NPROC]; q++) {
+    if (q == me)
+      continue;
+    acquire(&q->lock);
+    int yes = (q->state == RUNNABLE && q->level < level);
+    release(&q->lock);
+    if (yes)
+      return 1;
   }
+  return 0;
+}
+
+// called from usertrap() and kerneltrap() on every timer interrupt, for the
+// process the CPU was running. charges the tick and applies the MLFQ rules.
+// returns 1 if the process should yield the CPU now, 0 if it keeps running
+int
+mlfq_tick(struct proc *p)
+{
+  int level;
+
+  acquire(&p->lock);
+
+  p->runticks++;   // part 1: this process was running when the tick hit
+  p->used++;       // rule 4: it also counts against the current level's slice
+
+  // rule 5: slice used up -> drop one level (3 is the bottom), start a
+  // fresh slice, and give up the CPU
+  if (p->used >= mlfq_slice[p->level]) {
+    if (p->level < NLEVEL - 1)
+      p->level++;
+    p->used = 0;
+    release(&p->lock);
+    return 1;
+  }
+
+  level = p->level;
   release(&p->lock);
-  copyout(23, );
+
+  // rule 7: slice isn't used up, but if something at a higher level is
+  // waiting to run, step aside. used time is NOT reset (rule 6)
+  if (higher_runnable(p, level))
+    return 1;
+
+  // otherwise keep running
+  return 0;
+}
+
+// rule 8: move every process back to level 0 with a fresh slice.
+// called from clockintr() on CPU 0 when ticks hits a multiple of 64.
+// the caller holds tickslock; taking each p->lock after it is the
+// normal lock order
+void
+mlfq_boost(void)
+{
+  struct proc *p;
+
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    p->level = 0;
+    p->used = 0;
+    release(&p->lock);
+  }
+}
+
+// getpinfo: copy one struct pinfo for each process that's in use into the
+// user array at addr, in proc[] order, stopping after max of them.
+// returns how many were copied, or -1 if max < 0 or a copy fails
+int
+getpinfo(uint64 addr, int max)
+{
+  struct proc *me = myproc();   // the process asking (where we copy to)
+  struct proc *p;
+  struct pinfo info;            // just one entry on the kernel stack
+  int count = 0;
+
+  if (max < 0)
+    return -1;
+
+  for (p = proc; p < &proc[NPROC] && count < max; p++) {
+    // fill in our local copy while holding the lock...
+    acquire(&p->lock);
+    if (p->state == UNUSED) {
+      release(&p->lock);
+      continue;
+    }
+    info.pid = p->pid;
+    info.state = p->state;
+    info.level = p->level;
+    info.runticks = p->runticks;
+    info.nsched = p->nsched;
+    info.ctime = p->ctime;
+    safestrcpy(info.name, p->name, sizeof(info.name));
+    release(&p->lock);
+
+    // ...and only copy it out to the user after letting go of the lock
+    uint64 dst = addr + count * sizeof(struct pinfo);
+    if (copyout(me->pagetable, me->sz, dst, (char *)&info, sizeof(info)) < 0)
+      return -1;
+
+    count = count + 1;
+  }
+
+  return count;
 }

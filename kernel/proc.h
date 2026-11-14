@@ -28,18 +28,6 @@ struct cpu {
 
 extern struct cpu cpus[NCPU];
 
-//pinfo
-struct pinfo {
-
-	int pid;
-	int state; 
-	int level;
-	int runticks;
-	int nsched;
-	int ctime;
-	char name[16];
-};
-
 // per-process data for the trap handling code in trampoline.S.
 // sits in a page by itself just under the trampoline page in the
 // user page table. not specially mapped in the kernel page table.
@@ -113,10 +101,13 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
-  
-  // part 1a Counters
-  int runticks; // timer ticks this process was charged for, per each interrupt the process the cpu is running is charged
-  int nsched;   // times scheduler() switched to this process, add 1 each time scheduler() switches to the process
+
+  // scheduling stats + MLFQ state. p->lock must be held when using these
+  int runticks; // timer ticks this process has been charged for
+  int nsched;   // times scheduler() has switched to this process
   int ctime;    // value of ticks when the process was created
-  
+  int level;    // current MLFQ level: 0 (highest priority) to 3
+  int used;     // ticks used so far at the current level
 };
+
+#define NLEVEL 4 // number of MLFQ levels

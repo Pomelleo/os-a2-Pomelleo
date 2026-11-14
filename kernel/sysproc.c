@@ -111,8 +111,15 @@ sys_uptime(void)
   return xticks;
 }
 
+// getpinfo(struct pinfo *buf, int max): the real work is in getpinfo()
+// in proc.c, since that's where the process table lives
 uint64
 sys_getpinfo(void)
 {
+  uint64 buf;
+  int max;
 
+  argaddr(0, &buf);
+  argint(1, &max);
+  return getpinfo(buf, max);
 }
